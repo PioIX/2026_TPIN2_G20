@@ -31,7 +31,7 @@ CREATE TABLE mensajes (
 CREATE TABLE chatXusuario (
     idChat INT,
     idUsuario INT,
-    FOREIGN KEY (idChat) REFERENCES chat(id),
-    FOREIGN KEY (idUsuario) REFERENCES usuario(id)
+    PRIMARY KEY (idChat, idUsuario),
+    FOREIGN KEY (idChat) REFERENCES chats(idChat),
+    FOREIGN KEY (idUsuario) REFERENCES usuarioWP(idUsuario)
 );
-
