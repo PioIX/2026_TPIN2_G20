@@ -1,3 +1,4 @@
+DROP TABLE IF EXISTS chatXusuario;
 DROP TABLE IF EXISTS mensajes;
 DROP TABLE IF EXISTS chats;
 DROP TABLE IF EXISTS usuarioWP;
@@ -35,3 +36,9 @@ CREATE TABLE chatXusuario (
     FOREIGN KEY (idChat) REFERENCES chats(idChat),
     FOREIGN KEY (idUsuario) REFERENCES usuarioWP(idUsuario)
 );
+
+INSERT INTO usuarioWP (idUsuario, nombre, mail, contrasenia, foto)
+VALUES (1, 'ejemplo', 'ejemplo', 'pass', 'foto1'),
+       (2, 'ej', 'ej', 'pass', 'foto2');
+ 
+SELECT * FROM usuarioWP;
