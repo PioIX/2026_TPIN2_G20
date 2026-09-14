@@ -5,6 +5,7 @@ const { Server } = require("socket.io");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const pool = require("./modulos/mysql");
 
 app.use(cors());
 app.use(express.json());
@@ -32,8 +33,6 @@ io.use((socket, next) => {
   sessionMiddleware(socket.request, {}, next);
 });
 
-let contador = 0;
-
 io.on("connection", (socket) => {
   const req = socket.request;
 
@@ -43,31 +42,28 @@ io.on("connection", (socket) => {
     }
     req.session.room = data.room;
     socket.join(req.session.room);
-
-    io.to(req.session.room).emit("chat-messages", {
-      user: req.session.user,
-      room: req.session.room,
-    });
   });
+});
 
-  socket.on("pingAll", (data) => {
-    console.log("PING ALL:", data);
-    io.emit("pingAll", { event: "Ping to all", message: data });
-  });
+socket.on("sendMessage", async (data) => {
+  const { message, idUsuario } = data;
+  const idChat = req.session.room;
 
-  socket.on("sendMessage", (data) => {
-    io.to(req.session.room).emit("newMessage", {
-      room: req.session.room,
-      message: data.message,
-    });
-  });
+  const idMensaje = await siguienteId("mensajes", "idMensaje");
+  await pool.query(
+    "INSERT INTO mensajes (idMensaje, idChat, idUsuario, contenido, fecha) VALUES (?, ?, ?, ?, NOW())",
+    [idMensaje, idChat, idUsuario, message]
+  );
 
-  socket.on("eventoPersonalizado", () => {
-    contador++;
-    socket.emit("respuestaPersonalizada", { contador });
+  io.to(idChat).emit("newMessage", {
+    idMensaje,
+    idChat,
+    idUsuario,
+    contenido: message,
+    fecha: new Date(),
   });
+});
 
-  socket.on("disconnect", () => {
-    console.log("Disconnect");
-  });
+socket.on("disconnect", () => {
+  console.log("Disconnect");
 });
