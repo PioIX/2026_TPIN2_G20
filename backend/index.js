@@ -7,6 +7,16 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 const pool = require("./modulos/mysql");
 
+async function realizarQuery(sql, params = []) {
+  const [rows] = await pool.query(sql, params);
+  return rows;
+}
+
+async function obtenerSiguienteId(tabla, columna) {
+  const resultado = await realizarQuery(`SELECT MAX(${columna}) as maxId FROM ${tabla}`);
+  return (resultado[0].maxId || 0) + 1;
+}
+
 app.use(cors());
 app.use(express.json());
 
@@ -43,29 +53,33 @@ io.on("connection", (socket) => {
     req.session.room = data.room;
     socket.join(req.session.room);
   });
-});
 
-socket.on("sendMessage", async (data) => {
-  const { message, idUsuario } = data;
-  const idChat = req.session.room;
+  socket.on("sendMessage", async (data) => {
+    const { message, idUsuario } = data;
+    const idChat = req.session.room;
 
-  const idMensaje = await siguienteId("mensajes", "idMensaje");
-  await pool.query(
-    "INSERT INTO mensajes (idMensaje, idChat, idUsuario, contenido, fecha) VALUES (?, ?, ?, ?, NOW())",
-    [idMensaje, idChat, idUsuario, message]
-  );
+    try {
+      const idMensaje = await obtenerSiguienteId("mensajes", "idMensaje");
+      await realizarQuery(
+        "INSERT INTO mensajes (idMensaje, idChat, idUsuario, contenido, fecha) VALUES (?, ?, ?, ?, NOW())",
+        [idMensaje, idChat, idUsuario, message]
+      );
 
-  io.to(idChat).emit("newMessage", {
-    idMensaje,
-    idChat,
-    idUsuario,
-    contenido: message,
-    fecha: new Date(),
+      io.to(idChat).emit("newMessage", {
+        idMensaje,
+        idChat,
+        idUsuario,
+        contenido: message,
+        fecha: new Date(),
+      });
+    } catch (error) {
+      console.log("Error al guardar el mensaje:", error.message);
+    }
   });
-});
 
-socket.on("disconnect", () => {
-  console.log("Disconnect");
+  socket.on("disconnect", () => {
+    console.log("Disconnect");
+  });
 });
 
 //-----------------------------------------------------------------------------------------------------------------------------------
@@ -195,5 +209,83 @@ app.post("/api/registro", async function (req, res) {
       mensaje: "No se pudo registrar el usuario",
       error: error.message,
     });
+  }
+});
+
+app.post("/api/chats", async function (req, res) {
+  const { mail } = req.body;
+
+  try {
+    const otro = await realizarQuery("SELECT * FROM usuarioWP WHERE mail = ?", [mail]);
+
+    if (otro.length === 0) {
+      return res.status(404).send({
+        error: "USUARIO_NO_EXISTE",
+        mensaje: "El usuario no existe.",
+      });
+    }
+
+    const idChat = await obtenerSiguienteId("chats", "idChat");
+    await realizarQuery(
+      "INSERT INTO chats (idChat, nombre, esGrupo, foto) VALUES (?, NULL, FALSE, NULL)",
+      [idChat]
+    );
+    await realizarQuery(
+      "INSERT INTO chatXusuario (idChat, idUsuario) VALUES (?, ?), (?, ?)",
+      [idChat, req.session.user.idUsuario, idChat, otro[0].idUsuario]
+    );
+
+    res.send({ chatCreado: true, idChat });
+  } catch (error) {
+    res.status(500).send({ mensaje: "No se pudo crear el chat", error: error.message });
+  }
+});
+
+app.post("/api/grupos", async function (req, res) {
+  const { nombre, foto, mails } = req.body;
+
+  try {
+    const idsUsuarios = [];
+    for (const mail of mails) {
+      const encontrado = await realizarQuery("SELECT * FROM usuarioWP WHERE mail = ?", [mail]);
+      if (encontrado.length === 0) {
+        return res.status(404).send({
+          error: "USUARIO_NO_EXISTE",
+          mensaje: `El usuario ${mail} no existe.`,
+        });
+      }
+      idsUsuarios.push(encontrado[0].idUsuario);
+    }
+
+    const idChat = await obtenerSiguienteId("chats", "idChat");
+    await realizarQuery(
+      "INSERT INTO chats (idChat, nombre, esGrupo, foto) VALUES (?, ?, TRUE, ?)",
+      [idChat, nombre, foto || null]
+    );
+
+    const idsTotal = [req.session.user.idUsuario, ...idsUsuarios];
+    for (const idUsuario of idsTotal) {
+      await realizarQuery("INSERT INTO chatXusuario (idChat, idUsuario) VALUES (?, ?)", [idChat, idUsuario]);
+    }
+
+    res.send({ grupoCreado: true, idChat });
+  } catch (error) {
+    res.status(500).send({ mensaje: "No se pudo crear el grupo", error: error.message });
+  }
+});
+
+app.get("/api/mensajes/:idChat", async function (req, res) {
+  const { idChat } = req.params;
+
+  try {
+    const mensajes = await realizarQuery(
+      `SELECT m.idMensaje, m.contenido, m.fecha, m.idUsuario, u.nombre
+       FROM mensajes m JOIN usuarioWP u ON u.idUsuario = m.idUsuario
+       WHERE m.idChat = ? ORDER BY m.fecha ASC`,
+      [idChat]
+    );
+    res.send({ mensajes });
+  } catch (error) {
+    res.status(500).send({ mensaje: "No se pudieron obtener los mensajes", error: error.message });
   }
 });
