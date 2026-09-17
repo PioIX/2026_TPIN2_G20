@@ -17,15 +17,32 @@ async function obtenerSiguienteId(tabla, columna) {
   return (resultado[0].maxId || 0) + 1;
 }
 
-app.use(cors());
+const ORIGENES_PERMITIDOS = ["http://localhost:3000", "http://localhost:3001"];
+
+app.use(cors({ origin: ORIGENES_PERMITIDOS, credentials: true }));
 app.use(express.json());
 
 const sessionMiddleware = session({
   secret: "supersarasa",
   resave: false,
   saveUninitialized: false,
+  cookie: {
+    sameSite: "lax",
+    secure: false, // poner en true si se sirve por https
+  },
 });
 app.use(sessionMiddleware);
+
+// Middleware simple para proteger rutas que requieren sesión activa
+function requiereSesion(req, res, next) {
+  if (!req.session.user) {
+    return res.status(401).send({
+      error: "NO_AUTENTICADO",
+      mensaje: "Debes iniciar sesión.",
+    });
+  }
+  next();
+}
 
 const server = app.listen(PORT, () => {
   console.log(`Servidor NodeJS corriendo en http://localhost:${PORT}/`);
@@ -33,7 +50,7 @@ const server = app.listen(PORT, () => {
 
 const io = new Server(server, {
   cors: {
-    origin: ["http://localhost:3000", "http://localhost:3001"],
+    origin: ORIGENES_PERMITIDOS,
     methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true,
   },
@@ -92,7 +109,7 @@ app.get("/usuarioWP", async function (req, res) {
   }
 });
 
-app.post("/api/login", async function (req, res) {
+async function loginHandler(req, res) {
   const { mail, contrasenia } = req.body;
 
   if (!mail || !contrasenia) {
@@ -116,32 +133,16 @@ app.post("/api/login", async function (req, res) {
     }
 
     const usuarioValido = buscarUsuario[0];
-    let passwordCorrecta;
-
-    if (usuarioValido.password.startsWith("$2")) {
-      passwordCorrecta = await bcrypt.compare(
-        contrasenia,
-        usuarioValido.password
-      );
-    } else {
-      passwordCorrecta = usuarioValido.contrasenia === contrasenia;
-      if (passwordCorrecta) {
-        try {
-          const nuevoHash = await bcrypt.hash(contrasenia, 10);
-          await realizarQuery(
-            "UPDATE usuarioWP SET contrasenia = ? WHERE idUsuario = ?",
-            [nuevoHash, usuarioValido.idUsuario]
-          );
-        } catch (migrationError) {
-          console.log(
-            "No se pudo migrar el password a hash:",
-            migrationError.message
-          );
-        }
-      }
-    }
+    const passwordCorrecta = usuarioValido.contrasenia === contrasenia;
 
     if (passwordCorrecta) {
+      // Clave: guardamos el usuario en la sesión para que
+      // /api/chats, /api/grupos, etc. sepan quién está logueado.
+      req.session.user = {
+        idUsuario: usuarioValido.idUsuario,
+        nombre: usuarioValido.nombre,
+      };
+
       res.send({
         loginExitoso: true,
         mensaje: "¡Ingreso exitoso!",
@@ -162,15 +163,15 @@ app.post("/api/login", async function (req, res) {
       .status(500)
       .send({ mensaje: "Error en la base de datos", error: error.message });
   }
-});
+}
 
-app.post("/api/registro", async function (req, res) {
+async function registroHandler(req, res) {
   const { nombre, mail, contrasenia } = req.body;
 
   if (!nombre || !mail || !contrasenia) {
     return res.status(400).send({
       registroExitoso: false,
-      mensaje: "Debes enviar nombre, email y contraeña.",
+      mensaje: "Debes enviar nombre, email y contraseña.",
     });
   }
 
@@ -187,16 +188,11 @@ app.post("/api/registro", async function (req, res) {
       });
     }
 
-    const maxIdResult = await realizarQuery(
-      "SELECT MAX(idUsuario) as maxId FROM usuarioWP"
-    );
-    const nextId = (maxIdResult[0].maxId || 0) + 1;
-
-    const passwordHasheada = await bcrypt.hash(contrasenia, 10);
+    const nextId = await obtenerSiguienteId("usuarioWP", "idUsuario");
 
     await realizarQuery(
       "INSERT INTO usuarioWP (idUsuario, nombre, mail, contrasenia, foto) VALUES (?, ?, ?, ?, ?)",
-      [nextId, nombre, mail, passwordHasheada]
+      [nextId, nombre, mail, contrasenia, null]
     );
 
     res.send({
@@ -210,9 +206,48 @@ app.post("/api/registro", async function (req, res) {
       error: error.message,
     });
   }
-});
+}
 
-app.post("/api/chats", async function (req, res) {
+// Rutas pedidas por la consigna
+app.post("/login", loginHandler);
+app.post("/register", registroHandler);
+
+// Se mantienen los alias en español por compatibilidad con lo que ya existía
+app.post("/api/login", loginHandler);
+app.post("/api/registro", registroHandler);
+
+//--------------------------------------------------------------------------------------------------------------
+
+// Listado de chats del usuario logueado, incluyendo la foto del contacto
+// (o la foto del grupo, si el chat es grupal)
+
+
+app.get("/api/chats", requiereSesion, async function (req, res) {
+  const idUsuario = req.session.user.idUsuario;
+
+  try {
+    const chats = await realizarQuery(
+      `SELECT
+         c.idChat,
+         c.esGrupo,
+         CASE WHEN c.esGrupo THEN c.nombre ELSE otro.nombre END AS nombre,
+         CASE WHEN c.esGrupo THEN c.foto ELSE otro.foto END AS foto,
+         otro.idUsuario AS idContacto
+       FROM chats c
+       JOIN chatXusuario cxu ON cxu.idChat = c.idChat AND cxu.idUsuario = ?
+       LEFT JOIN chatXusuario cxu2
+         ON cxu2.idChat = c.idChat AND cxu2.idUsuario <> ? AND c.esGrupo = FALSE
+       LEFT JOIN usuarioWP otro ON otro.idUsuario = cxu2.idUsuario
+       ORDER BY c.idChat DESC`,
+      [idUsuario, idUsuario]
+    );
+
+    res.send({ chats });
+  } catch (error) {
+    res.status(500).send({ mensaje: "No se pudieron obtener los chats", error: error.message });
+  }
+});
+app.post("/api/chats", requiereSesion, async function (req, res) {
   const { mail } = req.body;
 
   try {
@@ -241,7 +276,7 @@ app.post("/api/chats", async function (req, res) {
   }
 });
 
-app.post("/api/grupos", async function (req, res) {
+app.post("/api/grupos", requiereSesion, async function (req, res) {
   const { nombre, foto, mails } = req.body;
 
   try {
@@ -274,7 +309,7 @@ app.post("/api/grupos", async function (req, res) {
   }
 });
 
-app.get("/api/mensajes/:idChat", async function (req, res) {
+app.get("/api/mensajes/:idChat", requiereSesion, async function (req, res) {
   const { idChat } = req.params;
 
   try {
