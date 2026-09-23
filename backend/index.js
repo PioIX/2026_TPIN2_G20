@@ -7,15 +7,23 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 const pool = require("./modulos/mysql");
 
+// -----------------------------------------------------------------------------
+// FUNCIONES AUXILIARES
+
 async function realizarQuery(sql, params = []) {
   const [rows] = await pool.query(sql, params);
   return rows;
 }
 
 async function obtenerSiguienteId(tabla, columna) {
-  const resultado = await realizarQuery(`SELECT MAX(${columna}) as maxId FROM ${tabla}`);
+  const resultado = await realizarQuery(
+    `SELECT MAX(${columna}) as maxId FROM ${tabla}`
+  );
   return (resultado[0].maxId || 0) + 1;
 }
+
+// -----------------------------------------------------------------------------
+// MIDDLEWARES Y CONFIGURACIÓN GENERAL
 
 const ORIGENES_PERMITIDOS = ["http://localhost:3000", "http://localhost:3001"];
 
@@ -28,12 +36,11 @@ const sessionMiddleware = session({
   saveUninitialized: false,
   cookie: {
     sameSite: "lax",
-    secure: false, // poner en true si se sirve por https
+    secure: false,
   },
 });
 app.use(sessionMiddleware);
 
-// Middleware simple para proteger rutas que requieren sesión activa
 function requiereSesion(req, res, next) {
   if (!req.session.user) {
     return res.status(401).send({
@@ -43,6 +50,9 @@ function requiereSesion(req, res, next) {
   }
   next();
 }
+
+// -----------------------------------------------------------------------------
+// SERVIDOR HTTP Y SOCKET.IO
 
 const server = app.listen(PORT, () => {
   console.log(`Servidor NodeJS corriendo en http://localhost:${PORT}/`);
@@ -99,7 +109,9 @@ io.on("connection", (socket) => {
   });
 });
 
-//-----------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// RUTAS: AUTENTICACIÓN Y USUARIOS
+
 app.get("/usuarioWP", async function (req, res) {
   try {
     let respuesta = await realizarQuery("SELECT * FROM usuarioWP;");
@@ -136,8 +148,6 @@ async function loginHandler(req, res) {
     const passwordCorrecta = usuarioValido.contrasenia === contrasenia;
 
     if (passwordCorrecta) {
-      // Clave: guardamos el usuario en la sesión para que
-      // /api/chats, /api/grupos, etc. sepan quién está logueado.
       req.session.user = {
         idUsuario: usuarioValido.idUsuario,
         nombre: usuarioValido.nombre,
@@ -211,17 +221,13 @@ async function registroHandler(req, res) {
 // Rutas pedidas por la consigna
 app.post("/login", loginHandler);
 app.post("/register", registroHandler);
-
-// Se mantienen los alias en español por compatibilidad con lo que ya existía
 app.post("/api/login", loginHandler);
 app.post("/api/registro", registroHandler);
 
-//--------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// RUTAS: CHATS Y MENSAJES
 
-// Listado de chats del usuario logueado, incluyendo la foto del contacto
-// (o la foto del grupo, si el chat es grupal)
-
-
+// Listado de chats del usuario logueado
 app.get("/api/chats", requiereSesion, async function (req, res) {
   const idUsuario = req.session.user.idUsuario;
 
@@ -244,19 +250,29 @@ app.get("/api/chats", requiereSesion, async function (req, res) {
 
     res.send({ chats });
   } catch (error) {
-    res.status(500).send({ mensaje: "No se pudieron obtener los chats", error: error.message });
+    res
+      .status(500)
+      .send({
+        mensaje: "No se pudieron obtener los chats",
+        error: error.message,
+      });
   }
 });
+
+// Crear chat individual a partir de mail
 app.post("/api/chats", requiereSesion, async function (req, res) {
   const { mail } = req.body;
 
   try {
-    const otro = await realizarQuery("SELECT * FROM usuarioWP WHERE mail = ?", [mail]);
+    const encontrado = await realizarQuery(
+      "SELECT * FROM usuarioWP WHERE mail = ?",
+      [mail]
+    );
 
-    if (otro.length === 0) {
+    if (encontrado.length === 0) {
       return res.status(404).send({
         error: "USUARIO_NO_EXISTE",
-        mensaje: "El usuario no existe.",
+        mensaje: `El usuario ${mail} no existe.`,
       });
     }
 
@@ -265,24 +281,34 @@ app.post("/api/chats", requiereSesion, async function (req, res) {
       "INSERT INTO chats (idChat, nombre, esGrupo, foto) VALUES (?, NULL, FALSE, NULL)",
       [idChat]
     );
-    await realizarQuery(
-      "INSERT INTO chatXusuario (idChat, idUsuario) VALUES (?, ?), (?, ?)",
-      [idChat, req.session.user.idUsuario, idChat, otro[0].idUsuario]
-    );
+
+    const idsTotal = [req.session.user.idUsuario, encontrado[0].idUsuario];
+    for (const idUsuario of idsTotal) {
+      await realizarQuery(
+        "INSERT INTO chatXusuario (idChat, idUsuario) VALUES (?, ?)",
+        [idChat, idUsuario]
+      );
+    }
 
     res.send({ chatCreado: true, idChat });
   } catch (error) {
-    res.status(500).send({ mensaje: "No se pudo crear el chat", error: error.message });
+    res
+      .status(500)
+      .send({ mensaje: "No se pudo crear el chat", error: error.message });
   }
 });
 
+// Crear chat grupal a partir de mails
 app.post("/api/grupos", requiereSesion, async function (req, res) {
   const { nombre, foto, mails } = req.body;
 
   try {
     const idsUsuarios = [];
     for (const mail of mails) {
-      const encontrado = await realizarQuery("SELECT * FROM usuarioWP WHERE mail = ?", [mail]);
+      const encontrado = await realizarQuery(
+        "SELECT * FROM usuarioWP WHERE mail = ?",
+        [mail]
+      );
       if (encontrado.length === 0) {
         return res.status(404).send({
           error: "USUARIO_NO_EXISTE",
@@ -300,27 +326,52 @@ app.post("/api/grupos", requiereSesion, async function (req, res) {
 
     const idsTotal = [req.session.user.idUsuario, ...idsUsuarios];
     for (const idUsuario of idsTotal) {
-      await realizarQuery("INSERT INTO chatXusuario (idChat, idUsuario) VALUES (?, ?)", [idChat, idUsuario]);
+      await realizarQuery(
+        "INSERT INTO chatXusuario (idChat, idUsuario) VALUES (?, ?)",
+        [idChat, idUsuario]
+      );
     }
 
     res.send({ grupoCreado: true, idChat });
   } catch (error) {
-    res.status(500).send({ mensaje: "No se pudo crear el grupo", error: error.message });
+    res
+      .status(500)
+      .send({ mensaje: "No se pudo crear el grupo", error: error.message });
   }
 });
 
+// Historial de mensajes de un chat
 app.get("/api/mensajes/:idChat", requiereSesion, async function (req, res) {
   const { idChat } = req.params;
+  const idUsuario = req.session.user.idUsuario;
 
   try {
+    const pertenencia = await realizarQuery(
+      "SELECT 1 FROM chatXusuario WHERE idChat = ? AND idUsuario = ?",
+      [idChat, idUsuario]
+    );
+
+    if (pertenencia.length === 0) {
+      return res.status(403).send({
+        error: "ACCESO_DENEGADO",
+        mensaje: "No tienes permiso para ver los mensajes de este chat.",
+      });
+    }
+
     const mensajes = await realizarQuery(
       `SELECT m.idMensaje, m.contenido, m.fecha, m.idUsuario, u.nombre
-       FROM mensajes m JOIN usuarioWP u ON u.idUsuario = m.idUsuario
-       WHERE m.idChat = ? ORDER BY m.fecha ASC`,
+       FROM mensajes m 
+       JOIN usuarioWP u ON u.idUsuario = m.idUsuario
+       WHERE m.idChat = ? 
+       ORDER BY m.fecha ASC`,
       [idChat]
     );
+
     res.send({ mensajes });
   } catch (error) {
-    res.status(500).send({ mensaje: "No se pudieron obtener los mensajes", error: error.message });
+    res.status(500).send({
+      mensaje: "No se pudieron obtener los mensajes",
+      error: error.message,
+    });
   }
 });
